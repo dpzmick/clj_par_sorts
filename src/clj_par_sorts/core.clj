@@ -12,18 +12,19 @@
 (declare merge-sort-serial)
 (declare merge-sort)
 
-;; oops this should be tail recursive
-(defn lst-merge
-  [lst1 lst2]
-  (cond
-    (nil? lst1) lst2
-    (nil? lst2) lst1
-    :else (let
-            [[f1 & rest1] lst1
-             [f2 & rest2] lst2]
-            (if (<= f1 f2)
-              (cons f1 (lst-merge rest1 lst2))
-              (cons f2 (lst-merge lst1 rest2))))))
+(defn lmerge
+  [acc lists]
+  (if (every? empty? lists)
+    acc
+    (let
+      [ordered            (filter seq (sort-by first lists))
+       list-with-smallest (first ordered)
+       smallest           (first list-with-smallest)]
+      (recur
+        (conj acc smallest)
+        (cons (rest list-with-smallest) (rest ordered))))))
+
+(defn lst-merge [& args] (lmerge [] args))
 
 (defn merge-sort-serial
   [lst]
@@ -85,54 +86,55 @@
 ;; sorts its private data
 ;; samples nthreads elements from the list, and sends the samples back to the main
 ;; thread
-;; the main thread "merges" the paritions, then picks the global partitions from
+;; the main thread merges the paritions, then picks the global partitions from
 ;; these samples, and sends these samples back to each sorting thread
 ;; each sorting thread bins it's values buy those samples, then sends the
 ;; samples to the appropriate thread
 ;; each thread receives a bunch of values and merges all the values it receives
-
-;; all my merges here are (sort (flatten)) which is obviously incorrect, but im
-;; not interested in figuring out the message passing
+;; im not sure where the stack overflow is occurring
 (defn sample-sort-thread
-  [my-channel channel-to-threads nthreads size]
+  [my-channel root-channel channel-to-threads nthreads size]
   (go
     (let
-      [my-elements (sort (apply vector (take size (repeatedly #(rand-int 42)))))
-       my-samples (take-nth (/ (count my-elements) nthreads) my-elements)]
+      [my-elements (sort (take size (repeatedly #(rand-int (* 2 size)))))
+       my-samples  (take-nth (/ (count my-elements) nthreads) my-elements)]
       (do
-        (>! my-channel my-samples)
+        (>! root-channel my-samples)
         (let
-          [global-partitioners (<! my-channel)
-           parted              (partition-list my-elements global-partitioners)
-           limited-channel     (a/take nthreads my-channel)]
+          [global-partitioners (<!! my-channel)
+           parted              (partition-list my-elements global-partitioners)]
           (do
             ;; shoot all the values everywhere (including self)
             (doall (map-indexed #(go (>! (get channel-to-threads %1) %2)) parted))
             ;; receive from everyone (including self)
             (let
-              [result (<!! (a/reduce conj [] limited-channel))]
+              [result (<!! (a/reduce conj [] (a/take nthreads my-channel)))]
               (do
-                (Thread/sleep (rand-int 200))
-                (println (sort (flatten result)))))))))))
+                (>!! root-channel (apply lst-merge result))))))))))
 
 (defn sample-sort
   [n size]
   (let
-    [channels  (apply vector (take n (repeatedly #(chan n))))]
+    [root-channel (chan n)
+     channels     (vec (take n (repeatedly #(chan n))))]
     (do
       ;; HAVE TO force the evaluation to start the threads
-      (doall (map #(sample-sort-thread % channels n size) channels))
+      (doall (map #(sample-sort-thread % root-channel channels n size) channels))
       ;; start of "root thread"
       (let
-        ;; should use merge instead of flatten + sort but this is okay for now
-        [single-use-channel (a/merge (map #(a/take 1 %) channels))
-         all-partitions (sort (flatten (<!! (a/reduce conj [] single-use-channel))))
-         global-parts   (take-nth (/ (count all-partitions) n) all-partitions)]
+        [single-use-channel (a/take n root-channel)
+         all-partitions     (apply lst-merge (<!! (a/reduce conj [] single-use-channel)))
+         global-parts       (take-nth (/ (count all-partitions) n) all-partitions)]
         (do
-          ;; send the partitions to each thread
-          (doall (map #(>!! % global-parts) channels)))))))
+          (doall (map #(>!! % global-parts) channels))
+          (let
+            [res-chanel (a/take n root-channel)
+             res        (apply lst-merge (<!! (a/reduce conj [] res-chanel)))]
+            (println (and
+                       (= (* n size) (count res))
+                       (apply <= res)))))))))
 
 (defn -main
   "I don't do a whole lot ... yet."
   [& args]
-  (println "Hello, World!"))
+  (sample-sort 1 100000))
