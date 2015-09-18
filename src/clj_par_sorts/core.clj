@@ -109,8 +109,7 @@
             ;; receive from everyone (including self)
             (let
               [result (<!! (a/reduce conj [] (a/take nthreads my-channel)))]
-              (do
-                (>!! root-channel (apply lst-merge result))))))))))
+              (>!! root-channel (apply lst-merge result)))))))))
 
 (defn sample-sort
   [n size]
